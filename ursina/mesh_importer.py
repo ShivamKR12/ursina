@@ -40,9 +40,11 @@ import builtins
 from ursina.sequence import Func
 from ursina import application
 
+
 imported_meshes = dict()
 blender_scenes = dict()
 # folders = (application.asset_folder, )
+
 
 def load_model(name, folder=None, file_types=('.bam', '.ursinamesh', '.obj', '.glb', '.gltf', '.blend'),
                use_deepcopy=False, gltf_no_srgb=Func(getattr, application, 'gltf_no_srgb')):
@@ -77,7 +79,11 @@ def load_model(name, folder=None, file_types=('.bam', '.ursinamesh', '.obj', '.g
     if name in imported_meshes:
         # print('load cached model', name)
         try:
-            instance = copy(imported_meshes[name]) if not use_deepcopy else deepcopy(imported_meshes[name])
+            if not use_deepcopy:
+                instance = copy(imported_meshes[name])
+            else:
+                instance = deepcopy(imported_meshes[name])
+
             instance.clearTexture()
             return instance
         except:
@@ -100,7 +106,7 @@ def load_model(name, folder=None, file_types=('.bam', '.ursinamesh', '.obj', '.g
                     # print_info('loading bam')
                     return builtins.loader.loadModel(file_path)  # type: ignore
 
-                if filetype in ('.gltf', '.glb'):
+                if filetype == '.gltf' or filetype == '.glb':
                     gltf_settings = gltf.GltfSettings()
                     gltf_settings.no_srgb = gltf_no_srgb
                     model_root = gltf.load_model(str(file_path), gltf_settings=gltf_settings)
@@ -127,6 +133,7 @@ def load_model(name, folder=None, file_types=('.bam', '.ursinamesh', '.obj', '.g
                     imported_meshes[name] = m
                     if not use_deepcopy:
                         m.save(f'{name}.bam')
+
                     return m
 
                 elif filetype == '.blend':
@@ -139,7 +146,6 @@ def load_model(name, folder=None, file_types=('.bam', '.ursinamesh', '.obj', '.g
                         return builtins.loader.loadModel(file_path)  # type: ignore
                     except:
                         pass
-
     return None
 
 
@@ -343,7 +349,9 @@ def obj_to_ursinamesh(folder=Func(getattr, application, 'models_compressed_folde
         name = name[:-4]
 
     for file_path in folder.glob(f'**/{name}.obj'):
+        # filepath = path / (os.path.splitext(f)[0] + '.obj')
         print('read obj at:', file_path)
+
         with file_path.open('r') as file:
             lines = file.readlines()
 
@@ -354,7 +362,7 @@ def obj_to_ursinamesh(folder=Func(getattr, application, 'models_compressed_folde
         uvs = []
         norm_indices = []
         norms = []
-        normals = []  # final normals made getting norms with norm_indices
+        normals = [] # final normals made getting norms with norm_indices
 
         vertex_colors = []
         vertex_colors_packed = []
@@ -387,25 +395,28 @@ def obj_to_ursinamesh(folder=Func(getattr, application, 'models_compressed_folde
                 if len(tri) == 3:
                     tris.extend(tri)
                     if current_color:
-                        vertex_colors.extend([current_color] * 3)
+                        vertex_colors.extend([current_color for i in range(3)])
                     elif vertex_colors_packed:
                         vertex_colors.extend([vertex_colors_packed[idx] if idx < len(vertex_colors_packed) else color.white for idx in tri])
+
                 elif len(tri) == 4:
                     tris.extend((tri[0], tri[1], tri[2], tri[2], tri[3], tri[0]))
                     if current_color:
-                        vertex_colors.extend([current_color] * 6)
+                        vertex_colors.extend([current_color for i in range(6)])
                     elif vertex_colors_packed:
                         vertex_colors.extend([vertex_colors_packed[idx] for idx in (tri[0], tri[1], tri[2], tri[2], tri[3], tri[0])])
-                else:  # ngon
-                    for i in range(1, len(tri) - 1):
-                        tris.extend((tri[i], tri[i + 1], tri[0]))
+
+                else: # ngon
+                    for i in range(1, len(tri)-1):
+                        tris.extend((tri[i], tri[i+1], tri[0]))
                     if current_color:
-                        vertex_colors.extend([current_color] * len(tri))
+                        vertex_colors.extend([current_color for i in range(len(tri))])
                     elif vertex_colors_packed:
-                        for i in range(1, len(tri) - 1):
-                            vertex_colors.extend([vertex_colors_packed[idx] for idx in (tri[i], tri[i + 1], tri[0])])
+                        for i in range(1, len(tri)-1):
+                            vertex_colors.extend([vertex_colors_packed[idx] for idx in (tri[i], tri[i+1], tri[0])])
+
                 try:
-                    uv = tuple(int(t.split('/')[1]) - 1 for t in l)
+                    uv = tuple(int(t.split('/')[1])-1 for t in l)
                     if len(uv) == 3:
                         uv_indices.extend(uv)
                     elif len(uv) == 4:
@@ -456,10 +467,12 @@ def obj_to_ursinamesh(folder=Func(getattr, application, 'models_compressed_folde
                 colors=vertex_colors
             )
 
-        mesh = Mesh(vertices=tuple(verts[t] for t in tris),
-                    colors=tuple(col for col in vertex_colors),
-                    uvs=tuple(uvs[uid] for uid in uv_indices),
-                    normals=normals)
+        mesh = Mesh(
+            vertices=tuple(verts[t] for t in tris),
+            colors=tuple(col for col in vertex_colors),
+            uvs=tuple(uvs[uid] for uid in uv_indices),
+            normals=normals
+        )
 
         if not save_to_file:
             return mesh
@@ -541,6 +554,7 @@ def ursina_mesh_to_obj(mesh, name='', out_path=Func(getattr, application, 'model
         out_path = out_path()
 
     from ursina.string_utilities import camel_to_snake
+
     obj = ''
     obj += f'mtllib {name}.mtl\n'
     obj += f'usemtl {name}\n'
@@ -591,9 +605,11 @@ def compress_internal():
     """
     for blend_file in application.internal_models_folder.glob('*.blend'):
         blend_to_obj(blend_file, export_mtl=False)
-        obj_to_ursinamesh(application.internal_models_compressed_folder,
-                          application.internal_models_compressed_folder,
-                          return_mesh=False, save_to_file=True, delete_obj=True)
+        obj_to_ursinamesh(
+            application.internal_models_compressed_folder,
+            application.internal_models_compressed_folder,
+            return_mesh=False, save_to_file=True, delete_obj=True
+        )
 
 
 if __name__ == '__main__':
@@ -601,9 +617,60 @@ if __name__ == '__main__':
     from ursina import *
     from ursina import Ursina, Entity, EditorCamera, Sky
     app = Ursina()
-    m = obj_to_ursinamesh(folder=application.asset_folder.parent / 'samples', name='procedural_rock_0',
-                           save_to_file=False, delete_obj=False)
+    # print('imported_meshes:\n', imported_meshes)
+    # Entity(model='quad').model.save('quad.bam')
+    m = obj_to_ursinamesh(folder=application.asset_folder.parent / 'samples', name='procedural_rock_0', save_to_file=False, delete_obj=False)
     print(m.serialize())
+    # Entity(model=m)
+    # EditorCamera()
+
+
+    # application.asset_folder = application.asset_folder.parent / 'samples'
+    # application.asset_folder = Path(r'C:\\Users\\Petter\\Downloads\\')
+    # Entity(model='c1a0')
+    # from ursina.shaders import lit_with_shadows_shader
+    # Entity.default_shader = lit_with_shadows_shader
+    # Entity(model='race')
+    # Entity(model='ambulance', x=1.5)
+
+    # application.asset_folder = Path(r'''C:\Users\Petter\Downloads''')
+    # t = perf_counter()
+    # Entity(model='untitled')
+    # print('-------', perf_counter() - t)
+    # m = load_model('cube', use_deepcopy=True)
+    # ground = Entity(model='plane', scale=10, texture='brick', texture_scale=Vec2(4))
+    # DirectionalLight()
+
+    # blender_scene = load_blender_scene(path=application.asset_folder, name='desert', reload=True)
+    # blender_scene = load_blender_scene(path=application.asset_folder, name='blender_level_editor_test_scene_2')
+    # print('-------', time.time() - t)
+
+    # print('--------', blender_scene.children)
+    # for e in blender_scene.children:
+    #     # e.color = color.random_color()
+    #     e.shader = rim_shader
+    #     e.texture='matcap_4'
+    #
+    #
+    # blender_scene.Plane_002.collider = 'mesh'
+    # from ursina.prefabs.first_person_controller import FirstPersonController
+    # player = FirstPersonController()
+
+    # def input(key):
+    #     if key == '+':
+    #         for e in blender_scene.children:
+    #             e.texture_scale = Vec2(e.texture_scale[0], e.texture_scale[1]+.1)
+    #     if key == '-':
+    #         for e in blender_scene.children:
+    #             e.texture_scale = Vec2(e.texture_scale[0], e.texture_scale[1]-.1)
+    #         print(blender_scene.children[0].texture_scale)
+    #
     EditorCamera()
     Sky(texture='sky_sunset')
+    # def update():
+    #     blender_scene.Cube.x += (held_keys['d'] - held_keys['a']) * time.dt * 10
+
+
     app.run()
+    # e = Entity(model=Cylinder(16))
+    # ursina_mesh_to_obj(e.model, name='quad_export_test')
