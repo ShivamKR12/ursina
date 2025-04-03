@@ -1,6 +1,0 @@
-{
-  "tasks": {
-    "build": "pip install --editable . && pip install ursina[extras]",
-    "test": "pytest"
-  }
-}

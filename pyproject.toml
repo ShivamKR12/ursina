@@ -86,8 +86,3 @@ builtins = [
     "raycast", "boxcast", "terraincast"
     ]
 
-[tool.pytest.ini_options]
-testpaths = [
-    "tests",
-    "ursina/tests",
-]
