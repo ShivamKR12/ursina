@@ -1,3 +1,177 @@
+"""
+===========================================================
+LEVEL EDITOR - BUG / FIX / STATUS LEDGER
+===========================================================
+
+Legend:
+- [UPSTREAM]   : Fixed and merged in official Ursina repo
+- [LOCAL]      : Fixed locally, not yet upstream
+- [PARTIAL]    : Works but incomplete / fragile
+- [UNRESOLVED] : Known issue, not yet fixed
+- [DESIGN]     : Intentional limitation / architectural gap
+
+-----------------------------------------------------------
+CONFIG / WARNINGS
+-----------------------------------------------------------
+
+[DESIGN] Panda3D config warnings on startup
+    - win-size passed as float instead of int
+    - undecorated passed as None instead of bool
+    - Harmless, noisy, unrelated to editor correctness
+
+
+-----------------------------------------------------------
+SAVE / LOAD / SERIALIZATION
+-----------------------------------------------------------
+
+[UPSTREAM] Entities turning into ErrorEntity after save/load
+    - Root cause: invalid kwargs during deserialization
+      (notably `parent` saved as string)
+    - Fix: skip unsupported kwargs during load
+    - Status: resolved for standard primitives
+
+[DESIGN] Parenting serialization
+    - Parent saved as string → invalid
+    - No entity IDs, no tree structure, no load order guarantees
+    - Current solution: DO NOT serialize parent
+    - Proper fix requires: ID system + tree-based load
+
+
+-----------------------------------------------------------
+GIZMOS / TRANSFORMS
+-----------------------------------------------------------
+
+[UPSTREAM] Move gizmo arrow shrinks after drag
+    - Cause: scale not restored after interaction
+    - Fix: restore original_scale in GizmoArrow.drop()
+    - Status: merged
+
+[PARTIAL] Rotation gizmo (R hotkey)
+    - Gizmo enable/state issues fixed locally
+    - Only Y-axis rotation implemented
+    - X/Z axes not implemented (unfinished feature)
+
+[UNRESOLVED] Quick scaling only works if entity already selected
+    - Selection → gizmo activation order issue
+    - Needs editor state machine improvement
+
+[UNRESOLVED] Scaling temporarily removes entity from hierarchy
+    - Caused by lack of proper transform hierarchy
+    - Closely tied to missing parenting support
+
+
+-----------------------------------------------------------
+SELECTION / INSPECTOR
+-----------------------------------------------------------
+
+[LOCAL] Inspector does not update after gizmo movement
+    - Fix: polling-based Inspector.update() +
+           update_transform_fields()
+    - Works in practice
+    - Risk: may be rejected upstream (non-event-driven)
+
+[UNRESOLVED] Objects sometimes become unselectable
+    - Likely causes:
+        * gizmo collider intercepting raycasts
+        * collider temporarily disabled
+        * selection list desync
+    - Not yet isolated
+
+[LOCAL → LIKELY UPSTREAM] Right-click → Model → selecting model does nothing
+    - Original bug: model never assigned, undo not recorded
+    - Fix:
+        * assign e.model
+        * record undo
+        * update inspector
+    - Clean correctness fix, high chance of acceptance
+
+
+-----------------------------------------------------------
+SPAWNING / PREFABS / CREATION
+-----------------------------------------------------------
+
+[LOCAL] ClassSpawner / prefab spawning broken
+    - Original issue:
+        * spawned entity not parented
+        * not registered in scene.entities / application.entities
+        * no update/input/render lifecycle
+    - Local fix:
+        * assign sane parent
+        * force into engine + editor entity lists
+        * restore enabled / input flags
+    - Status: works correctly
+    - Upstream risk: implementation is defensive / intrusive
+      (may need refactor into helper function)
+
+[LOCAL] "N hotkey does not add block" (tooltip/keybinding mismatch)
+    - Actual issue: tooltip said "N", functionality was bound to "I"
+    - This led users to think the feature was broken
+    - Functionality itself was already implemented and working
+    - Fix: rebind action to N key (as intended) and update tooltip
+    - Status: fully working and tested locally
+
+
+-----------------------------------------------------------
+PROCEDURAL MESHES / MODELS
+-----------------------------------------------------------
+
+[UPSTREAM] Pyramid / Cone invisibility & ErrorEntity on reload
+    - Root cause:
+        * procedural mesh (Cone()) created at class level
+        * shared GPU mesh across instances
+    - Fix: instance-level mesh construction
+    - Status: merged
+
+[PARTIAL] Procedural mesh serialization
+    - Mesh.serialize() exists
+    - repr(mesh) fallback works
+    - Editor does not track procedural parameters yet
+    - Reload edge cases remain
+
+
+-----------------------------------------------------------
+UX / DOCUMENTATION
+-----------------------------------------------------------
+
+[DESIGN] No visible Save button
+    - Intentional (code-first editor)
+    - Ctrl+S is primary save mechanism
+
+[UNRESOLVED] Ctrl+S not mentioned in help menu
+    - Documentation gap
+    - Low priority
+
+
+-----------------------------------------------------------
+SUMMARY
+-----------------------------------------------------------
+
+UPSTREAM FIXED:
+    - Gizmo shrink bug
+    - ErrorEntity on cube reload
+    - Procedural mesh shared-state bug
+
+LOCAL FIXED (WORKING):
+    - ClassSpawner runtime behavior
+    - ModelMenu model assignment
+    - Inspector live transform updates (polling-based)
+    - Correct N-key block spawning (tooltip/keybinding mismatch)
+
+PARTIALLY FIXED:
+    - Rotation gizmo (Y-axis only)
+    - Procedural mesh reload edge cases
+
+UNRESOLVED / DESIGN LIMITATIONS:
+    - Parenting serialization
+    - Full rotation axes
+    - Scaling hierarchy issues
+    - Selection flakiness
+    - Help / UX gaps
+
+-----------------------------------------------------------
+"""
+
+
 from ursina import *
 from ursina.shaders import unlit_shader, lit_with_shadows_shader, matcap_shader, triplanar_shader, normals_shader
 from time import perf_counter
@@ -6,6 +180,7 @@ import builtins
 import pyperclip
 import inspect
 import sys
+import traceback
 
 class LevelEditor(Entity):
     def __init__(self, **kwargs):
@@ -34,10 +209,10 @@ class LevelEditor(Entity):
         self.local_global_menu = ButtonGroup(['local', 'global'], default='global', min_selection=1, position=window.top_left+Vec2(.25,0), parent=self.ui)
         self.local_global_menu.scale *= .5
         self.local_global_menu.on_value_changed = self.render_selection
-        # self.play_button = Button(parent=camera.ui, position=window.top, scale=.02, text='p', origin_y=.5)
-        # def play_button_on_click():
-        #     self.edit_mode = not self.edit_mode
-        # self.play_button.on_click = play_button_on_click
+        self.play_button = Button(parent=camera.ui, position=window.top, scale=.02, text='p', origin_y=.5)
+        def play_button_on_click():
+            self.edit_mode = not self.edit_mode
+        self.play_button.on_click = play_button_on_click
 
         self.target_fov = 90
 
@@ -279,6 +454,10 @@ class LevelEditor(Entity):
         # print('---------- rendered selection')
 
         LEVEL_EDITOR.hierarchy_list.render_selection()
+        print('[render_selection]')
+        for e in LEVEL_EDITOR.selection:
+            if isinstance(e, Pyramid):
+                print('selected pyramid', id(e), 'model_id=', id(e.model), 'vert_count=', len(e.model.vertices))
 
 
     def on_enable(self):
@@ -288,9 +467,11 @@ class LevelEditor(Entity):
     def on_disable(self):
         self.ui.enabled = False
 
+
 class ErrorEntity(Entity):
     def __init__(self, model='wireframe_cube', color=color.red, **kwargs):
         super().__init__(model=model, color=color, **kwargs)
+
 
 class LevelEditorScene:
     def __init__(self, x, y, name, **kwargs):
@@ -366,29 +547,78 @@ class LevelEditorScene:
             _fields = reader.fieldnames[1:]
 
             for line in reader:
-                kwargs = {key : value for key, value in line.items() if value and not key == 'class'}
-                if not 'parent' in kwargs:
+                # kwargs = {key : value for key, value in line.items() if value and not key == 'class'}
+                # if not 'parent' in kwargs:
+                #     kwargs['parent'] = self.scene_parent
+                # for key, value in kwargs.items():
+                #     if key == 'parent':
+                #         continue
+                #     try:
+                #         value = eval(value)
+                #         kwargs[key] = value
+                #     except:
+                #         pass
+                # if not line["class"] in imported_classes:
+                #     target_class = ErrorEntity
+                # else:
+                #     target_class = imported_classes[line["class"]]
+                # try:
+                #     instance = target_class(**kwargs)
+                # except:
+                #     instance = ErrorEntity()
+
+                kwargs = {key: value for key, value in line.items() if value and not key == 'class'}
+                if 'parent' not in kwargs:
                     kwargs['parent'] = self.scene_parent
-
-                for key, value in kwargs.items():
-                    if key == 'parent':
+                for k, v in list(kwargs.items()):
+                    if k == 'parent':
                         continue
-
                     try:
-                        value = eval(value)
-                        kwargs[key] = value
-                    except:
-                        pass
-
-                if not line["class"] in imported_classes:
+                        kwargs[k] = eval(v)
+                    except Exception as e:
+                        print(f'[LOAD][EVAL] key="{k}", value="{v}"')
+                        traceback.print_exception(type(e), e, e.__traceback__)
+                        kwargs[k] = v
+                if 'parent' in kwargs:
+                    p = kwargs['parent']
+                    if isinstance(p, str):
+                        if p.strip("'\"") == 'entity':
+                            kwargs['parent'] = self.scene_parent
+                        else:
+                            try:
+                                kwargs['parent'] = eval(p)
+                            except Exception as e:
+                                print(f'[LOAD][PARENT] failed to eval parent="{p}", falling back to scene_parent')
+                                traceback.print_exception(type(e), e, e.__traceback__)
+                                kwargs['parent'] = self.scene_parent
+                class_identifier = line.get("class", None)
+                target_class = None
+                if class_identifier:
+                    if '.' in class_identifier:
+                        module_name, cls_name = class_identifier.rsplit('.', 1)
+                        try:
+                            import importlib
+                            mod = importlib.import_module(module_name)
+                            target_class = getattr(mod, cls_name, None)
+                        except Exception as e:
+                            print(f'[LOAD][CLASS] failed to import {module_name}.{cls_name}')
+                            traceback.print_exception(type(e), e, e.__traceback__)
+                    if target_class is None:
+                        bare_name = class_identifier.split('.')[-1]
+                        target_class = imported_classes.get(bare_name, None)
+                if not target_class:
                     target_class = ErrorEntity
-                else:
-                    target_class = imported_classes[line["class"]]
-
-
+                # else:
+                #     target_class = imported_classes[line["class"]]
                 try:
                     instance = target_class(**kwargs)
-                except:
+                    print(f'[LOAD ENTITY]', instance, 'entity_id=', id(instance), 'enabled=', instance.enabled, 'visible=', instance.visible,)
+                    print(f'[MODEL]', 'model_id=', id(instance.model), 'model_type=', type(instance.model),)
+                    geom = getattr(instance.model, 'geom', None) or getattr(instance.model, '_geom', None)
+                    print('[GPU]', 'model_id=', id(instance.model), 'geom_id=', id(geom),)
+                except Exception as e:
+                    print(f'[LOAD][INSTANTIATE] class={target_class}, kwargs={kwargs}')
+                    traceback.print_exception(type(e), e, e.__traceback__)
                     instance = ErrorEntity()
 
                 self.entities.append(instance)
@@ -533,6 +763,7 @@ class GizmoArrow(Draggable):
 
 
     def drag(self):
+        print('[GIZMOARROW DRAG START]', self.name, 'id:', id(self), 'scale:', self.scale, 'original_scale:', getattr(self, "original_scale", None), 'parent:', self.parent)
         self.world_parent = LEVEL_EDITOR
         LEVEL_EDITOR.gizmo.world_parent = self
         for e in LEVEL_EDITOR.selection:
@@ -550,6 +781,7 @@ class GizmoArrow(Draggable):
             e._original_world_transform = e.world_transform
 
     def drop(self):
+        print('[GIZMOARROW DROP START]', self.name, 'id:', id(self), 'scale before restore:', self.scale, 'original_scale:', getattr(self, "original_scale", None), 'parent:', self.parent)
         LEVEL_EDITOR.gizmo.world_parent = LEVEL_EDITOR
 
         for e in LEVEL_EDITOR.selection:
@@ -577,6 +809,7 @@ class GizmoArrow(Draggable):
         self.rotation = self.original_rotation
         self.scale = Vec3(getattr(self, 'original_scale', self.scale))
         LEVEL_EDITOR.render_selection()
+        print('[GIZMOARROW DROP END]', self.name, 'id:', id(self), 'scale after restore:', self.scale)
 
     def input(self, key):
         super().input(key)
@@ -584,7 +817,6 @@ class GizmoArrow(Draggable):
             self.step = (1,1,1)
         elif key == 'control up':
             self.step = (0,0,0)
-
 
 
 class Gizmo(Entity):
@@ -608,13 +840,24 @@ class Gizmo(Entity):
 
         for e in self.arrow_parent.children:
             e.highlight_color = color.white
-            e.original_scale = e.scale
+            # e.original_scale = e.scale
+            e.original_scale = Vec3(e.scale)   # store a copy, not a reference
+
+        # right after the for e in self.arrow_parent.children: loop where you set original_scale
+        for e in self.arrow_parent.children:
+            print('[GIZMO INIT] child:', e.name, 'id:', id(e), 'scale:', e.scale, 'orig_id:', id(getattr(e, "original_scale", None)), 'orig_is_same:', getattr(e, "original_scale", None) is e.scale)
 
         self.fake_gizmo = Entity(parent=LEVEL_EDITOR, enabled=False)
         self.fake_gizmo.subgizmos = dict()
         for key, value in self.subgizmos.items():
             self.fake_gizmo.subgizmos[key] = duplicate(self.subgizmos[key], parent=self.fake_gizmo, collider=None, ignore=True)
 
+        # debug / make sure fake copies have independent original_scale
+        for key, orig in self.subgizmos.items():
+            fake = self.fake_gizmo.subgizmos.get(key)
+            if fake is not None:
+                fake.original_scale = Vec3(fake.scale)
+                print('[FAKE GIZMO] key', key, 'orig id', id(orig), 'fake id', id(fake), 'orig.scale', orig.scale, 'fake.scale', fake.scale, 'same_obj?', fake.scale is orig.scale)
 
     def input(self, key):   # this will execute before GizmoArrow drag()
         if key == 'left mouse down' and mouse.hovered_entity in self.subgizmos.values():
@@ -658,7 +901,15 @@ class Gizmo(Entity):
         self.visible = True
         [setattr(e, 'visible_self', False) for e in self.fake_gizmo.subgizmos.values()]
         [setattr(e, 'visible_self', True) for e in self.subgizmos.values()]
-        [setattr(e, 'scale', e.original_scale) for e in self.subgizmos.values()]
+        # [setattr(e, 'scale', e.original_scale) for e in self.subgizmos.values()]
+        for k, e in self.subgizmos.items():
+            print('[GIZMO DROP] restoring', k, 'child id', id(e), 'orig:', getattr(e, 'original_scale', None), 'current:', e.scale)
+            # restore using a copy to avoid shared-reference mutation
+            try:
+                e.scale = Vec3(getattr(e, 'original_scale', e.scale))
+            except Exception:
+                e.scale = getattr(e, 'original_scale', e.scale)
+            print('[GIZMO DROP] restored', k, '->', e.scale)
 
 
     def update(self):
@@ -667,13 +918,14 @@ class Gizmo(Entity):
         self.world_scale = distance(self.world_position, camera.world_position) * camera.fov * .0005
 
         for i, axis in enumerate('xyz'):
-            if self.subgizmos[axis].dragging:
+            sg = self.subgizmos[axis]
+            if sg.dragging:
+                print('[GIZMO UPDATE] dragging', axis, 'child id', id(sg), 'scale:', sg.scale, 'original_scale:', getattr(sg, 'original_scale', None), 'parent:', sg.parent)
                 setattr(self.lock_axis_helper, axis, self.subgizmos[axis].get_position(relative_to=self.lock_axis_helper_parent)[i])
                 self.fake_gizmo.world_position = self.lock_axis_helper.world_position
 
         if self.subgizmos['xz'].dragging:
             self.fake_gizmo.world_position = self.subgizmos['xz'].world_position
-
 
 
 class RotationGizmo(Entity):
@@ -751,8 +1003,6 @@ class RotationGizmo(Entity):
                     e.rotation -= rotation_amount
 
 
-
-
 class ScaleGizmo(Draggable):
     def __init__(self, **kwargs):
         super().__init__(parent=LEVEL_EDITOR.gizmo, model='cube', scale=.25, color=color.orange, visible=True, always_on_top=True, render_queue=1, is_gizmo=True, dragging=False, shader=unlit_shader)
@@ -796,6 +1046,7 @@ class ScaleGizmo(Draggable):
             else:
                 for e in LEVEL_EDITOR.selection:
                     e.scale += Vec3(sum(mouse.velocity), sum(mouse.velocity), sum(mouse.velocity)) * self.sensitivity * time.dt * self.axis
+
 
 class BoxGizmo(Entity):
     def __init__(self):
@@ -882,8 +1133,6 @@ class BoxGizmo(Entity):
 
             if not self.scale_from_center:
                 self.target.world_position = lerp(self.scaler.world_position, self.helper.world_position, .5)
-
-
 
 
 class GizmoToggler(Entity):
@@ -1117,6 +1366,7 @@ class QuickScaler(Entity):
 class QuickRotator(Entity):
     def __init__(self):
         super().__init__(parent=LEVEL_EDITOR)
+        self.target_entity = None
 
     def input(self, key):
         if held_keys['control'] or held_keys['shift'] or held_keys['alt'] or held_keys['s']:
@@ -1131,6 +1381,9 @@ class QuickRotator(Entity):
                 return
 
             self.target_entity = LEVEL_EDITOR.selection[0]
+            LEVEL_EDITOR.gizmo_toggler.animator.state = 'u'
+            LEVEL_EDITOR.gizmo.enabled = True
+            LEVEL_EDITOR.render_selection()
             LEVEL_EDITOR.rotation_gizmo.subgizmos['y'].input('left mouse down')
             LEVEL_EDITOR.rotation_gizmo.subgizmos['y'].start_dragging()
 
@@ -1193,8 +1446,6 @@ class RotateRelativeToView(Entity):
         if self.target_entity and held_keys['t']:
             __class__._rotation_helper.rotation_y -= mouse.velocity[0] * __class__.sensitivity.x / camera.aspect_ratio
             __class__._rotation_helper.rotation_x += mouse.velocity[1] * __class__.sensitivity.y
-
-
 
 
 class Selector(Entity):
@@ -1260,7 +1511,6 @@ class Selector(Entity):
         [setattr(e, 'collision', False) for e in LEVEL_EDITOR.entities if not hasattr(e, 'is_gizmo')]
 
 
-
 class SelectionBox(Entity):
     def __init__(self, **kwargs):
         super().__init__(parent=LEVEL_EDITOR.ui, visible=False, **kwargs)
@@ -1318,8 +1568,6 @@ class SelectionBox(Entity):
             self.scale_y = mouse.y - self.y
 
 
-
-
 class WhiteCube(Entity):
     default_values = Entity.default_values | dict(model='cube', shader='lit_with_shadows_shader', texture='white_cube', collider='box', name='cube') # combine dicts
     def __init__(self, **kwargs):
@@ -1348,9 +1596,44 @@ class ClassSpawner(Entity):
         if self.class_to_spawn and self.class_to_spawn != 'None':
             print('spawn class', self.class_to_spawn)
             self.class_instance = LEVEL_EDITOR.class_menu.available_classes[self.class_to_spawn](world_transform=self.world_transform, add_to_scene_entities=False)
+            # ensure runtime instance receives update/input
+            inst = self.class_instance
+            # parent to the scene_parent if available, else to top-level scene
+            try:
+                parent_root = LEVEL_EDITOR.current_scene.scene_parent if (LEVEL_EDITOR.current_scene and LEVEL_EDITOR.current_scene.scene_parent) else scene
+                inst.parent = parent_root
+            except Exception:
+                inst.parent = scene
+            # ensure it's in the engine update lists
+            try:
+                if inst not in scene.entities:
+                    scene.entities.append(inst)
+                if inst not in application.entities:
+                    application.entities.append(inst)
+            except Exception:
+                pass
+            # add to the editor's scene entity list (so the editor tracks it)
+            try:
+                if LEVEL_EDITOR.current_scene and inst not in LEVEL_EDITOR.current_scene.entities:
+                    LEVEL_EDITOR.current_scene.entities.append(inst)
+            except Exception:
+                pass
+            inst.enabled = True
+            inst.ignore = False
+            inst.ignore_input = False
+            print('[CLASSSPAWNER] forced into update lists; parent:', inst.parent, 'in scene.entities:', inst in scene.entities)
 
     def stop(self):
         if self.class_instance:
+            try:
+                if self.class_instance in scene.entities:
+                    scene.entities.remove(self.class_instance)
+                if self.class_instance in application.entities:
+                    application.entities.remove(self.class_instance)
+                if LEVEL_EDITOR.current_scene and self.class_instance in LEVEL_EDITOR.current_scene.entities:
+                    LEVEL_EDITOR.current_scene.entities.remove(self.class_instance)
+            except Exception:
+                pass
             destroy(self.class_instance)
             self.class_instance = None
         self.enabled = True
@@ -1415,11 +1698,11 @@ class Spawner(Entity):
 
 
     def input(self, key):
-        if key == 'i':
+        if key == 'n':
             mouse.traverse_target = LEVEL_EDITOR.grid
             self.spawn_entity()
 
-        elif key == 'i up' and self.target:
+        elif key == 'n up' and self.target:
             self.drop_entity()
             mouse.traverse_target = scene
 
@@ -1444,7 +1727,10 @@ class Spawner(Entity):
 
         LEVEL_EDITOR.current_scene.entities.append(self.target)
         LEVEL_EDITOR.render_selection()
-
+        print('\n--- AFTER SPAWN ---')
+        for e in LEVEL_EDITOR.current_scene.entities:
+            if isinstance(e, Pyramid):
+                print('Pyramid:', id(e), 'enabled=', e.enabled, 'visible=', e.visible, 'model_id=', id(e.model), 'parent=', e.parent)
 
     def drop_entity(self):
         LEVEL_EDITOR.current_scene.undo.record_undo(('delete entities', [LEVEL_EDITOR.current_scene.entities.index(self.target), ], [repr(self.target), ]))
@@ -1511,7 +1797,6 @@ class Grouper(Entity):
             LEVEL_EDITOR.render_selection()
 
 
-
 class PointOfViewSelector(Entity):
     def __init__(self, **kwargs):
         super().__init__(parent=LEVEL_EDITOR.ui, model='cube', collider='box', texture='white_cube', scale=.05, position=window.top_right-Vec2(.1,.05))
@@ -1545,6 +1830,7 @@ class PointOfViewSelector(Entity):
 #         if held_keys['alt'] and key == 'c' and mouse.hovered_entity:
 #             self.color = mouse.hovered_entity.color
 
+
 class Copier(Entity):
     prefix = 'ursina_editor_copy_data:```py\n'
 
@@ -1576,8 +1862,6 @@ class Copier(Entity):
                 LEVEL_EDITOR.current_scene.undo.record_undo(('delete entities', [LEVEL_EDITOR.entities.index(en) for en in clones], [repr(e) for e in clones]))
                 print('------------------------')
                 LEVEL_EDITOR.render_selection()
-
-
 
 
 class LevelMenu(Entity):
@@ -1895,6 +2179,9 @@ class Inspector(Entity):
             elif self.selected_entity != LEVEL_EDITOR.selection[0]:
                 self.update_inspector()
 
+    def update(self):
+        if self.ui.enabled and LEVEL_EDITOR.selection:
+            self.update_transform_fields()
 
     def update_inspector(self):
         # print('update inspector')
@@ -2016,6 +2303,22 @@ class Inspector(Entity):
 
                 i += 1
 
+    def update_transform_fields(self):
+        if not LEVEL_EDITOR.selection:
+            return
+
+        e = LEVEL_EDITOR.selection[0]
+        for i, attr in enumerate((
+            'x','y','z',
+            'rotation_x','rotation_y','rotation_z',
+            'scale_x','scale_y','scale_z'
+        )):
+            field = self.transform_fields[i]
+            value = round(getattr(e, attr), 4)
+
+            # avoid overwriting while user is typing
+            if not field.active:
+                field.text_field.text_entity.text = str(value)
 
 
 class MenuHandler(Entity):
@@ -2064,6 +2367,7 @@ class MenuHandler(Entity):
             self.state = self.keybinds[key]
             # print('sets state:', self.keybinds[key], self.state)
 
+
 class AssetMenu(ButtonList):
     def __init__(self):
         super().__init__(button_dict=dict(), parent=LEVEL_EDITOR.ui, enabled=False, popup=True, z=-2, name=__class__.__name__, scale=.5)
@@ -2092,10 +2396,17 @@ class ModelMenu(AssetMenu):
         changes = []
         for e in LEVEL_EDITOR.selection:
             index = LEVEL_EDITOR.entities.index(e)
-            if not e.model:
-                changes.append((index, 'model', None, name))
-            else:
-                changes.append((index, 'model', e.model.name, name))
+            old = e.model.name if e.model else None
+            changes.append((index, 'model', old, name))
+            e.model = name
+            # # optional but recommended:
+            # if name == 'cube':
+            #     e.collider = 'box'
+            
+            # if not e.model:
+            #     changes.append((index, 'model', None, name))
+            # else:
+            #     changes.append((index, 'model', e.model.name, name))
 
         # for e in LEVEL_EDITOR.selection:
         #     e.model = name
@@ -2104,6 +2415,8 @@ class ModelMenu(AssetMenu):
         #     else:
         #         e.collider = None
 
+        LEVEL_EDITOR.current_scene.undo.record_undo(changes)
+        LEVEL_EDITOR.inspector.update_inspector()
         LEVEL_EDITOR.menu_handler.state = 'None'
 
 
@@ -2403,7 +2716,6 @@ class Duplicator(Entity):
                 self.axis_lock = None
 
 
-
 class SunHandler(Entity):
     def __init__(self, **kwargs):
         super().__init__(parent=LEVEL_EDITOR, **kwargs)
@@ -2451,7 +2763,6 @@ class RightClickMenu(Entity):
                 self.radial_menu.enabled = True
 
 
-
 class Search(Entity):
     def __init__(self, **kwargs):
         super().__init__(parent=LEVEL_EDITOR.ui, **kwargs)
@@ -2464,6 +2775,7 @@ class Search(Entity):
 
         # elif len(key) == 1:
         #     print('---', self.input_field.text)
+
 
 def get_major_axis_relative_to_view(entity): # if we're looking at the entity from the right/left, return 0, top/bot:1, front/back: 2
     r = round(camera.back.dot(entity.right), 1)
