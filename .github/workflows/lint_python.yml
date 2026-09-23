@@ -1,5 +1,15 @@
 name: lint_python
-on: [pull_request, push]
+on:
+  push:
+    paths:
+      - '**.py'
+      - '**.spec'
+      - '**.ini'
+      - 'requirements.txt'
+      - 'setup.py'
+      - '.github/workflows/*.yml'
+  workflow_dispatch:
+
 jobs:
   lint_python:
     runs-on: ubuntu-latest

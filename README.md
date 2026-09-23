@@ -1,5 +1,17 @@
 # ursina    ʕ •ᴥ•ʔゝ□
 
+<div align="center">
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Ursina](https://img.shields.io/badge/Engine-Ursina-black?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+
+</div>
+
+
+
 [Website](https://pokepetter.github.io/ursina/index.html) | [Discord](https://discord.gg/ydXfhyb) | [Twitter](https://twitter.com/ursinaengine) | [Patreon](https://www.patreon.com/ursinaengine) | [Sponsor](https://github.com/sponsors/pokepetter)
 
 An easy to use game engine/framework for python.
